@@ -1,0 +1,150 @@
+{
+  "Comment": "Contact Information Extraction Pipeline",
+  "StartAt": "StartEMRServerlessJob",
+  "States": {
+    "StartEMRServerlessJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::emr-serverless:startJobRun",
+      "Parameters": {
+        "ApplicationId.$": "$.applicationId",
+        "ExecutionRoleArn.$": "$.executionRoleArn",
+        "JobDriver": {
+          "SparkSubmit": {
+            "EntryPoint.$": "$.entryPoint",
+            "EntryPointArguments.$": "$.entryPointArguments",
+            "SparkSubmitParameters.$": "$.sparkSubmitParameters"
+          }
+        },
+        "ConfigurationOverrides": {
+          "MonitoringConfiguration": {
+            "S3MonitoringConfiguration": {
+              "LogUri.$": "$.logUri"
+            }
+          }
+        }
+      },
+      "Next": "CheckJobStatus",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 60,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "NotifyFailure",
+          "ResultPath": "$.error"
+        }
+      ]
+    },
+    "CheckJobStatus": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::emr-serverless:getJobRun",
+      "Parameters": {
+        "ApplicationId.$": "$.applicationId",
+        "JobRunId.$": "$.JobRunId"
+      },
+      "Next": "JobComplete?",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 10,
+          "BackoffRate": 1.5
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "NotifyFailure",
+          "ResultPath": "$.error"
+        }
+      ]
+    },
+    "JobComplete?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.JobRun.State",
+          "StringEquals": "SUCCESS",
+          "Next": "CalculateMetrics"
+        },
+        {
+          "Variable": "$.JobRun.State",
+          "StringEquals": "FAILED",
+          "Next": "NotifyFailure"
+        }
+      ],
+      "Default": "WaitForJobCompletion"
+    },
+    "WaitForJobCompletion": {
+      "Type": "Wait",
+      "Seconds": 60,
+      "Next": "CheckJobStatus"
+    },
+    "CalculateMetrics": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName.$": "$.metricsLambda",
+        "Payload": {
+          "outputPath.$": "$.outputPath",
+          "jobRunId.$": "$.JobRunId",
+          "applicationId.$": "$.applicationId",
+          "crawlId.$": "$.crawlId"
+        }
+      },
+      "Next": "NotifySuccess",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "NotifySuccess",
+          "ResultPath": "$.metricsError"
+        }
+      ]
+    },
+    "NotifySuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn.$": "$.snsTopicArn",
+        "Message": {
+          "jobRunId.$": "$.JobRunId",
+          "status": "SUCCESS",
+          "metrics.$": "$.Payload",
+          "crawlId.$": "$.crawlId",
+          "completionTime.$": "$$.State.EnteredTime"
+        },
+        "Subject": "Contact Extraction Pipeline Succeeded"
+      },
+      "End": true
+    },
+    "NotifyFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn.$": "$.snsTopicArn",
+        "Message": {
+          "jobRunId.$": "$.JobRunId",
+          "status": "FAILED",
+          "error.$": "$.error",
+          "crawlId.$": "$.crawlId",
+          "failureTime.$": "$$.State.EnteredTime"
+        },
+        "Subject": "Contact Extraction Pipeline Failed"
+      },
+      "End": true
+    }
+  }
+}
